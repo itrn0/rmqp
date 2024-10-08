@@ -95,6 +95,10 @@ func (p *Publisher) connect() error {
 		select {
 		case <-p.ctx.Done():
 			return ErrContextDone
+		case <-time.After(p.options.Heartbeat):
+			if ch.IsClosed() {
+				return fmt.Errorf("channel closed")
+			}
 		case msg, msgOk := <-p.messages:
 			if !msgOk {
 				return fmt.Errorf("channel closed")
