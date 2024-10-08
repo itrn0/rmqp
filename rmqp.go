@@ -10,7 +10,6 @@ import (
 )
 
 var (
-	ErrTimeout     = errors.New("publish timeout")
 	ErrContextDone = errors.New("context done")
 )
 
@@ -22,37 +21,35 @@ type Message struct {
 }
 
 type Publisher struct {
-	Url      string
 	ctx      context.Context
-	timeout  time.Duration
+	options  *Options
 	messages chan Message
+	Url      string
 }
 
 func NewPublisher(
 	ctx context.Context,
 	url string,
-	capacity int,
-	timeout time.Duration,
+	options *Options,
 ) *Publisher {
+	options = handleOptions(options)
 	return &Publisher{
 		ctx:      ctx,
 		Url:      url,
-		messages: make(chan Message, capacity),
-		timeout:  timeout,
+		messages: make(chan Message, options.Capacity),
+		options:  options,
 	}
 }
 
 func (p *Publisher) Publish(msg Message) error {
 	if msg.ContentType == "" {
-		msg.ContentType = "text/plain"
+		msg.ContentType = p.options.ContentType
 	}
 	select {
 	case <-p.ctx.Done():
 		return ErrContextDone
 	case p.messages <- msg:
 		return nil
-	case <-time.After(p.timeout):
-		return ErrTimeout
 	}
 }
 
@@ -66,13 +63,20 @@ func (p *Publisher) Start() {
 		if err := p.connect(); err != nil {
 			slog.Warn("RabbitMQ connect error", "err", err)
 		}
-		slog.Debug("reconnecting to RabbitMQ after 3 second")
-		time.Sleep(3 * time.Second)
+		slog.Debug(fmt.Sprintf("reconnecting to RabbitMQ after %v second", p.options.ReconnectDelay.Seconds()))
+		time.Sleep(p.options.ReconnectDelay)
 	}
 }
 
 func (p *Publisher) connect() error {
-	conn, err := amqp.Dial(p.Url)
+	cfg := amqp.Config{
+		Heartbeat:  p.options.Heartbeat,
+		Properties: amqp.Table{},
+	}
+	if p.options.ConnectionName != "" {
+		cfg.Properties["connection_name"] = p.options.ConnectionName
+	}
+	conn, err := amqp.DialConfig(p.Url, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
@@ -91,7 +95,10 @@ func (p *Publisher) connect() error {
 		select {
 		case <-p.ctx.Done():
 			return ErrContextDone
-		case msg := <-p.messages:
+		case msg, msgOk := <-p.messages:
+			if !msgOk {
+				return fmt.Errorf("channel closed")
+			}
 			err = ch.Publish(
 				msg.ExchangeName,
 				msg.RoutingKey,
